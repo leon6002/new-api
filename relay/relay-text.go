@@ -22,12 +22,19 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// getAndValidateTextRequest 从 gin 上下文中获取并验证文本请求
+// c: gin 的上下文对象，用于获取 HTTP 请求信息和返回响应。
+// relayInfo: 包含中继模式信息的 RelayInfo 结构体。
+// 返回值: 验证通过后的 GeneralOpenAIRequest 结构体指针和可能出现的错误。
 func getAndValidateTextRequest(c *gin.Context, relayInfo *relaycommon.RelayInfo) (*dto.GeneralOpenAIRequest, error) {
 	textRequest := &dto.GeneralOpenAIRequest{}
+	// 从 HTTP 请求体中反序列化 JSON 数据到 textRequest
 	err := common.UnmarshalBodyReusable(c, textRequest)
 	if err != nil {
 		return nil, err
 	}
+
+	// 根据中继模式和请求情况，设置默认的 Model 参数值
 	if relayInfo.RelayMode == relayconstant.RelayModeModerations && textRequest.Model == "" {
 		textRequest.Model = "text-moderation-latest"
 	}
@@ -35,12 +42,16 @@ func getAndValidateTextRequest(c *gin.Context, relayInfo *relaycommon.RelayInfo)
 		textRequest.Model = c.Param("model")
 	}
 
+	// 验证 MaxTokens 参数的合法性
 	if textRequest.MaxTokens < 0 || textRequest.MaxTokens > math.MaxInt32/2 {
 		return nil, errors.New("max_tokens is invalid")
 	}
+	// 验证 Model 参数是否为空
 	if textRequest.Model == "" {
 		return nil, errors.New("model is required")
 	}
+
+	// 根据不同的中继模式，验证请求中必需的字段
 	switch relayInfo.RelayMode {
 	case relayconstant.RelayModeCompletions:
 		if textRequest.Prompt == "" {
@@ -51,6 +62,7 @@ func getAndValidateTextRequest(c *gin.Context, relayInfo *relaycommon.RelayInfo)
 			return nil, errors.New("field messages is required")
 		}
 	case relayconstant.RelayModeEmbeddings:
+		// 此模式下可能不需要额外的验证
 	case relayconstant.RelayModeModerations:
 		if textRequest.Input == "" {
 			return nil, errors.New("field input is required")
@@ -60,22 +72,31 @@ func getAndValidateTextRequest(c *gin.Context, relayInfo *relaycommon.RelayInfo)
 			return nil, errors.New("field instruction is required")
 		}
 	}
+
+	// 设置是否启用流式响应
 	relayInfo.IsStream = textRequest.Stream
 	return textRequest, nil
 }
 
+// TextHelper 处理文本请求的助手函数
+//
+// 参数:
+// c *gin.Context: Gin框架的上下文对象，用于处理HTTP请求和响应
+//
+// 返回值:
+// *dto.OpenAIErrorWithStatusCode: 包装了OpenAI错误信息和HTTP状态码的结构体指针，用于向客户端返回错误信息
 func TextHelper(c *gin.Context) *dto.OpenAIErrorWithStatusCode {
 
-	relayInfo := relaycommon.GenRelayInfo(c)
+	relayInfo := relaycommon.GenRelayInfo(c) // 生成中继信息
 
-	// get & validate textRequest 获取并验证文本请求
+	// 获取并验证文本请求
 	textRequest, err := getAndValidateTextRequest(c, relayInfo)
 	if err != nil {
 		common.LogError(c, fmt.Sprintf("getAndValidateTextRequest failed: %s", err.Error()))
 		return service.OpenAIErrorWrapper(err, "invalid_text_request", http.StatusBadRequest)
 	}
 
-	// map model name
+	// 映射模型名称
 	modelMapping := c.GetString("model_mapping")
 	isModelMapped := false
 	if modelMapping != "" && modelMapping != "{}" {
@@ -86,7 +107,7 @@ func TextHelper(c *gin.Context) *dto.OpenAIErrorWithStatusCode {
 		}
 		if modelMap[textRequest.Model] != "" {
 			textRequest.Model = modelMap[textRequest.Model]
-			// set upstream model name
+			// 设置上游模型名称
 			isModelMapped = true
 		}
 	}
@@ -97,10 +118,11 @@ func TextHelper(c *gin.Context) *dto.OpenAIErrorWithStatusCode {
 	var preConsumedQuota int
 	var ratio float64
 	var modelRatio float64
-	//err := service.SensitiveWordsCheck(textRequest)
+
+	// 获取prompt令牌并进行敏感词检查
 	promptTokens, err, sensitiveTrigger := getPromptTokens(textRequest, relayInfo)
 
-	// count messages token error 计算promptTokens错误
+	// 计算prompt令牌错误
 	if err != nil {
 		if sensitiveTrigger {
 			return service.OpenAIErrorWrapper(err, "sensitive_words_detected", http.StatusBadRequest)
@@ -108,6 +130,7 @@ func TextHelper(c *gin.Context) *dto.OpenAIErrorWithStatusCode {
 		return service.OpenAIErrorWrapper(err, "count_token_messages_failed", http.StatusInternalServerError)
 	}
 
+	// 处理模型价格未知的情况，计算预消耗的配额
 	if modelPrice == -1 {
 		preConsumedTokens := common.PreConsumedQuota
 		if textRequest.MaxTokens != 0 {
@@ -120,18 +143,21 @@ func TextHelper(c *gin.Context) *dto.OpenAIErrorWithStatusCode {
 		preConsumedQuota = int(modelPrice * common.QuotaPerUnit * groupRatio)
 	}
 
-	// pre-consume quota 预消耗配额
+	// 预消耗配额
 	preConsumedQuota, userQuota, openaiErr := preConsumeQuota(c, preConsumedQuota, relayInfo)
 	if openaiErr != nil {
 		return openaiErr
 	}
 
+	// 获取适配器并初始化
 	adaptor := GetAdaptor(relayInfo.ApiType)
 	if adaptor == nil {
 		return service.OpenAIErrorWrapper(fmt.Errorf("invalid api type: %d", relayInfo.ApiType), "invalid_api_type", http.StatusBadRequest)
 	}
 	adaptor.Init(relayInfo, *textRequest)
+
 	var requestBody io.Reader
+	// 根据API类型准备请求体
 	if relayInfo.ApiType == relayconstant.APITypeOpenAI {
 		if isModelMapped {
 			jsonStr, err := json.Marshal(textRequest)
@@ -154,24 +180,27 @@ func TextHelper(c *gin.Context) *dto.OpenAIErrorWithStatusCode {
 		requestBody = bytes.NewBuffer(jsonData)
 	}
 
+	// 执行HTTP请求
 	resp, err := adaptor.DoRequest(c, relayInfo, requestBody)
 	if err != nil {
 		return service.OpenAIErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)
 	}
 	relayInfo.IsStream = relayInfo.IsStream || strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
 
+	// 处理非200响应
 	if resp.StatusCode != http.StatusOK {
 		returnPreConsumedQuota(c, relayInfo.TokenId, userQuota, preConsumedQuota)
 		return service.RelayErrorHandler(resp)
 	}
 
+	// 处理响应体
 	usage, openaiErr, sensitiveResp := adaptor.DoResponse(c, resp, relayInfo)
 	if openaiErr != nil {
-		if sensitiveResp == nil { // 如果没有敏感词检查结果
+		if sensitiveResp == nil { // 没有敏感词检查结果
 			returnPreConsumedQuota(c, relayInfo.TokenId, userQuota, preConsumedQuota)
 			return openaiErr
 		} else {
-			// 如果有敏感词检查结果，不返回预消耗配额，继续消耗配额
+			// 有敏感词检查结果，消耗配额
 			postConsumeQuota(c, relayInfo, *textRequest, usage, ratio, preConsumedQuota, userQuota, modelRatio, groupRatio, modelPrice, sensitiveResp)
 			if constant.StopOnSensitiveEnabled { // 是否直接返回错误
 				return openaiErr
@@ -179,77 +208,126 @@ func TextHelper(c *gin.Context) *dto.OpenAIErrorWithStatusCode {
 			return nil
 		}
 	}
+	// 消耗配额
 	postConsumeQuota(c, relayInfo, *textRequest, usage, ratio, preConsumedQuota, userQuota, modelRatio, groupRatio, modelPrice, nil)
 	return nil
 }
 
+// getPromptTokens 根据不同的 relay 模式计算 prompt 中的 token 数量，并检查是否触发敏感内容。
+//
+// 参数:
+// - textRequest: 包含消息、prompt 或输入内容以及模型信息的请求DTO。
+// - info: 包含 relay 模式和其他上下文信息的 Relay 信息。
+//
+// 返回值:
+// - int: 计算得到的 prompt 中的 token 数量。
+// - error: 在处理过程中遇到的任何错误。
+// - bool: 指示是否触发了敏感内容的标志。
 func getPromptTokens(textRequest *dto.GeneralOpenAIRequest, info *relaycommon.RelayInfo) (int, error, bool) {
 	var promptTokens int
 	var err error
 	var sensitiveTrigger bool
+	// 检查是否需要对 prompt 进行敏感内容检查
 	checkSensitive := constant.ShouldCheckPromptSensitive()
 	switch info.RelayMode {
 	case relayconstant.RelayModeChatCompletions:
+		// 对聊天完成消息中的 token 进行计数
 		promptTokens, err, sensitiveTrigger = service.CountTokenMessages(textRequest.Messages, textRequest.Model, checkSensitive)
 	case relayconstant.RelayModeCompletions:
+		// 对 completions 模式下的 prompt 进行 token 计数
 		promptTokens, err, sensitiveTrigger = service.CountTokenInput(textRequest.Prompt, textRequest.Model, checkSensitive)
 	case relayconstant.RelayModeModerations:
+		// 对 modulations 模式下的输入进行 token 计数
 		promptTokens, err, sensitiveTrigger = service.CountTokenInput(textRequest.Input, textRequest.Model, checkSensitive)
 	case relayconstant.RelayModeEmbeddings:
+		// 对 embeddings 模式下的输入进行 token 计数
 		promptTokens, err, sensitiveTrigger = service.CountTokenInput(textRequest.Input, textRequest.Model, checkSensitive)
 	default:
+		// 处理未知 relay 模式的情况
 		err = errors.New("unknown relay mode")
 		promptTokens = 0
 	}
+	// 更新 relay 信息中的 prompt token 数量
 	info.PromptTokens = promptTokens
 	return promptTokens, err, sensitiveTrigger
 }
 
 // 预扣费并返回用户剩余配额
+// preConsumeQuota 预消费配额函数
+// 在执行具体操作前，检查并预先消费用户和令牌的配额。
+// 参数:
+// - c *gin.Context: Gin框架的上下文对象，用于获取请求信息和记录日志。
+// - preConsumedQuota int: 预先消费的配额数量。
+// - relayInfo *relaycommon.RelayInfo: 包含用户ID、令牌ID和是否无限令牌的信息。
+// 返回值:
+// - int: 实际预消费的配额数量。
+// - int: 操作后用户的剩余配额。
+// - *dto.OpenAIErrorWithStatusCode: 如果有错误发生，返回错误信息和HTTP状态码。
 func preConsumeQuota(c *gin.Context, preConsumedQuota int, relayInfo *relaycommon.RelayInfo) (int, int, *dto.OpenAIErrorWithStatusCode) {
+	// 尝试从缓存获取用户配额
 	userQuota, err := model.CacheGetUserQuota(relayInfo.UserId)
 	if err != nil {
+		// 获取用户配额失败，返回错误
 		return 0, 0, service.OpenAIErrorWrapper(err, "get_user_quota_failed", http.StatusInternalServerError)
 	}
+
+	// 检查用户配额是否充足
 	if userQuota <= 0 || userQuota-preConsumedQuota < 0 {
+		// 用户配额不足，返回错误
 		return 0, 0, service.OpenAIErrorWrapper(errors.New("user quota is not enough"), "insufficient_user_quota", http.StatusForbidden)
 	}
+
+	// 减少用户配额
 	err = model.CacheDecreaseUserQuota(relayInfo.UserId, preConsumedQuota)
 	if err != nil {
+		// 减少用户配额失败，返回错误
 		return 0, 0, service.OpenAIErrorWrapper(err, "decrease_user_quota_failed", http.StatusInternalServerError)
 	}
+
+	// 用户额度充足的情况下，检查令牌额度是否充足
 	if userQuota > 100*preConsumedQuota {
-		// 用户额度充足，判断令牌额度是否充足
 		if !relayInfo.TokenUnlimited {
-			// 非无限令牌，判断令牌额度是否充足
+			// 令牌非无限，检查令牌额度
 			tokenQuota := c.GetInt("token_quota")
 			if tokenQuota > 100*preConsumedQuota {
-				// 令牌额度充足，信任令牌
+				// 令牌额度充足，无需预消费
 				preConsumedQuota = 0
 				common.LogInfo(c.Request.Context(), fmt.Sprintf("user %d quota %d and token %d quota %d are enough, trusted and no need to pre-consume", relayInfo.UserId, userQuota, relayInfo.TokenId, tokenQuota))
 			}
 		} else {
-			// in this case, we do not pre-consume quota
-			// because the user has enough quota
+			// 用户拥有无限令牌，配额充足，无需预消费
 			preConsumedQuota = 0
 			common.LogInfo(c.Request.Context(), fmt.Sprintf("user %d with unlimited token has enough quota %d, trusted and no need to pre-consume", relayInfo.UserId, userQuota))
 		}
 	}
+
+	// 如果预消费配额大于0，尝试预先消费令牌配额
 	if preConsumedQuota > 0 {
 		userQuota, err = model.PreConsumeTokenQuota(relayInfo.TokenId, preConsumedQuota)
 		if err != nil {
+			// 预消费令牌配额失败，返回错误
 			return 0, 0, service.OpenAIErrorWrapper(err, "pre_consume_token_quota_failed", http.StatusForbidden)
 		}
 	}
+
+	// 返回预消费的配额数量和操作后的用户剩余配额
 	return preConsumedQuota, userQuota, nil
 }
 
+// returnPreConsumedQuota 用于归还预先消费的配额
+// 参数:
+// c: gin上下文，用于传递请求相关的context
+// tokenId: 令牌ID，标识特定的令牌
+// userQuota: 用户配额，表示用户拥有的总配额量
+// preConsumedQuota: 预先消费的配额量，需要归还的量
 func returnPreConsumedQuota(c *gin.Context, tokenId int, userQuota int, preConsumedQuota int) {
+	// 当预消费的配额不为0时，异步归还预消费的配额
 	if preConsumedQuota != 0 {
 		go func(ctx context.Context) {
-			// return pre-consumed quota
+			// 异步执行归还操作，将预消费的配额加回到用户配额中
 			err := model.PostConsumeTokenQuota(tokenId, userQuota, -preConsumedQuota, 0, false)
 			if err != nil {
+				// 记录归还预消费配额失败的错误日志
 				common.SysError("error return pre-consumed quota: " + err.Error())
 			}
 		}(c)
