@@ -27,7 +27,12 @@ func SensitiveWordContains(text string) (bool, []string) {
 	return false, nil
 }
 
-// SensitiveWordReplace 敏感词替换，返回是否包含敏感词和替换后的文本
+// SensitiveWordReplace 接收一个字符串和一个布尔值作为参数，用于敏感词替换。
+// 如果敏感词列表为空，则返回 false、nil 和原始文本。
+// 将输入文本转换为小写，并初始化敏感词自动机。
+// 使用自动机进行多模式搜索，返回所有匹配的敏感词。
+// 如果有匹配的敏感词，则将其替换为 "*###*"，并返回 true、敏感词列表和替换后的文本。
+// 如果没有匹配的敏感词，则返回 false、nil 和原始文本。
 func SensitiveWordReplace(text string, returnImmediately bool) (bool, []string, string) {
 	if len(constant.SensitiveWords) == 0 {
 		return false, nil, text

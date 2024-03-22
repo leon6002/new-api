@@ -1,16 +1,23 @@
+FROM node:16 as builder
+
+WORKDIR /build
+COPY web/package.json .
+RUN npm install
+COPY ./web .
+COPY ./VERSION .
+RUN DISABLE_ESLINT_PLUGIN='true' REACT_APP_VERSION=$(cat VERSION) npm run build
+
 FROM golang AS builder2
 
 ENV GO111MODULE=on \
     CGO_ENABLED=1 \
     GOOS=linux
-#    GOPROXY=https://mirrors.aliyun.com/goproxy/
 
 WORKDIR /build
 ADD go.mod go.sum ./
-RUN go clean -modcache
 RUN go mod download
 COPY . .
-COPY ./web/build ./web/build
+COPY --from=builder /build/build ./web/build
 RUN go build -ldflags "-s -w -X 'one-api/common.Version=$(cat VERSION)' -extldflags '-static'" -o one-api
 
 FROM alpine

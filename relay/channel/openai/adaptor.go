@@ -71,12 +71,26 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 	return channel.DoApiRequest(a, c, info, requestBody)
 }
 
+// DoResponse 处理OpenAI的响应。
+//
+// 参数:
+// c *gin.Context - Gin框架的上下文对象，用于处理HTTP请求。
+// resp *http.Response - 从OpenAI获取的HTTP响应。
+// info *relaycommon.RelayInfo - 包含与请求相关的额外信息，如是否流式处理、中继模式等。
+//
+// 返回值:
+// *dto.Usage - 请求使用的资源或消耗的信息。
+// *dto.OpenAIErrorWithStatusCode - OpenAI请求过程中发生的错误，包含HTTP状态码。
+// *dto.SensitiveResponse - 可能包含敏感信息的响应内容。
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage *dto.Usage, err *dto.OpenAIErrorWithStatusCode, sensitiveResp *dto.SensitiveResponse) {
 	if info.IsStream {
+		// 处理流式响应
 		var responseText string
 		err, responseText = OpenaiStreamHandler(c, resp, info.RelayMode)
+		// 从响应文本中提取使用信息
 		usage, _ = service.ResponseText2Usage(responseText, info.UpstreamModelName, info.PromptTokens)
 	} else {
+		// 处理非流式响应
 		err, usage, sensitiveResp = OpenaiHandler(c, resp, info.PromptTokens, info.UpstreamModelName)
 	}
 	return
